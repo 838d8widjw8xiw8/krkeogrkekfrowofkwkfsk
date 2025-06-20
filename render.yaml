@@ -2,10 +2,17 @@ services:
   - type: web
     name: bitcoin-analyzer-bot
     env: python
+    region: frankfurt  # Türkiye'ye yakın region
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python bwss.py
-    plan: free
+    healthCheckPath: /health
     envVars:
       - key: BOT_TOKEN
+        value: "7715414446:AAGDvt3TiyjZxWAr6NzY8CN5qQf0_fy4PWw"
         sync: false
-    healthCheckPath: /health
+    # Free plan için önemli ayarlar
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
