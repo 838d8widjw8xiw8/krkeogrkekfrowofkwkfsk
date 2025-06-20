@@ -6,6 +6,11 @@ from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
+# Web server için gerekli kütüphaneler
+from flask import Flask
+import threading
+import os
+
 # Bot Token
 BOT_TOKEN = "7715414446:AAGDvt3TiyjZxWAr6NzY8CN5qQf0_fy4PWw"
 
@@ -25,6 +30,26 @@ RATE_LIMIT_PER_DAY = 50
 
 # In-memory storage for rate limiting
 user_requests = defaultdict(list)
+
+# Flask app for keeping bot alive
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🚀 Bitcoin Wallet Analyzer Bot is running!"
+
+@app.route('/status')
+def status():
+    return {
+        "status": "online",
+        "bot": "Bitcoin Wallet Analyzer",
+        "timestamp": datetime.now().isoformat()
+    }
+
+def run_flask():
+    """Flask sunucusunu çalıştır"""
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 class RateLimiter:
     @staticmethod
@@ -457,71 +482,62 @@ async def analyze_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔄 **Recent Transactions:**
         """
         
-        # Bu kısmı analyze_address fonksiyonunuzda "🔄 **Recent Transactions:**" satırından sonra değiştirin
-
-analysis_text += "🔄 **Recent Transactions:**\n"
-
-if transactions:
-    for i, tx in enumerate(transactions[:3]):
-        # Zaman bilgisi
-        if tx.get('status', {}).get('block_time'):
-            tx_time = datetime.fromtimestamp(tx['status']['block_time']).strftime('%m/%d %H:%M')
-        else:
-            tx_time = 'Pending'
-        
-        # Bu adrese gelen miktar (outputs)
-        value_received = 0
-        for vout in tx['vout']:
-            # scriptpubkey_address kontrolü - hem string hem liste olabilir
-            addr_list = vout.get('scriptpubkey_address', [])
-            if isinstance(addr_list, str):
-                addr_list = [addr_list]
-            elif addr_list is None:
-                addr_list = []
-            
-            if address in addr_list:
-                value_received += vout['value']
-        
-        # Bu adresten giden miktar (inputs)
-        value_sent = 0
-        for vin in tx['vin']:
-            prevout = vin.get('prevout', {})
-            if prevout:
-                prev_addr = prevout.get('scriptpubkey_address')
-                # String veya liste kontrolü
-                if isinstance(prev_addr, str):
-                    prev_addr_list = [prev_addr]
-                elif isinstance(prev_addr, list):
-                    prev_addr_list = prev_addr
+        if transactions:
+            for i, tx in enumerate(transactions[:3]):
+                # Zaman bilgisi
+                if tx.get('status', {}).get('block_time'):
+                    tx_time = datetime.fromtimestamp(tx['status']['block_time']).strftime('%m/%d %H:%M')
                 else:
-                    prev_addr_list = []
+                    tx_time = 'Pending'
                 
-                if address in prev_addr_list:
-                    value_sent += prevout.get('value', 0)
-        
-        # Net miktar ve yön belirleme
-        net_value = value_received - value_sent
-        
-        if net_value > 0:
-            direction = "📈 Received"
-            amount_text = analyzer.format_btc(net_value)
-        elif net_value < 0:
-            direction = "📉 Sent"
-            amount_text = analyzer.format_btc(abs(net_value))
+                # Bu adrese gelen miktar (outputs)
+                value_received = 0
+                for vout in tx['vout']:
+                    addr_list = vout.get('scriptpubkey_address', [])
+                    if isinstance(addr_list, str):
+                        addr_list = [addr_list]
+                    elif addr_list is None:
+                        addr_list = []
+                    
+                    if address in addr_list:
+                        value_received += vout['value']
+                
+                # Bu adresten giden miktar (inputs)
+                value_sent = 0
+                for vin in tx['vin']:
+                    prevout = vin.get('prevout', {})
+                    if prevout:
+                        prev_addr = prevout.get('scriptpubkey_address')
+                        if isinstance(prev_addr, str):
+                            prev_addr_list = [prev_addr]
+                        elif isinstance(prev_addr, list):
+                            prev_addr_list = prev_addr
+                        else:
+                            prev_addr_list = []
+                        
+                        if address in prev_addr_list:
+                            value_sent += prevout.get('value', 0)
+                
+                # Net miktar ve yön belirleme
+                net_value = value_received - value_sent
+                
+                if net_value > 0:
+                    direction = "📈 Received"
+                    amount_text = analyzer.format_btc(net_value)
+                elif net_value < 0:
+                    direction = "📉 Sent"
+                    amount_text = analyzer.format_btc(abs(net_value))
+                else:
+                    direction = "🔄 Internal"
+                    amount_text = analyzer.format_btc(value_received) if value_received > 0 else "0.00000000 BTC"
+                
+                # TX ID (kısaltılmış)
+                tx_id_short = tx['txid'][:8] + "..." + tx['txid'][-8:]
+                
+                analysis_text += f"\n• {direction} {amount_text} - {tx_time}"
+                analysis_text += f"\n  TX: `{tx_id_short}`"
         else:
-            direction = "🔄 Internal"
-            amount_text = analyzer.format_btc(value_received) if value_received > 0 else "0.00000000 BTC"
-        
-        # TX ID (kısaltılmış)
-        tx_id_short = tx['txid'][:8] + "..." + tx['txid'][-8:]
-        
-        analysis_text += f"\n• {direction} {amount_text} - {tx_time}"
-        analysis_text += f"\n  TX: `{tx_id_short}`"
-else:
-    analysis_text += "\n• No transactions found"
-
-analysis_text += "\n"
-        """
+            analysis_text += "\n• No transactions found"
         
         keyboard = [
             [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh_{address}"),
@@ -548,6 +564,11 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot"""
+    # Flask sunucusunu ayrı thread'de başlat
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    print("🌐 Flask server started for keep-alive")
+    
     application = Application.builder().token(BOT_TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
