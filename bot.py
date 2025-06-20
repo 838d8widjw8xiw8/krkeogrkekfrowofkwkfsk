@@ -2,14 +2,15 @@ import asyncio
 import aiohttp
 import json
 import os
+import threading
 from datetime import datetime, timedelta
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-from aiohttp import web
+from flask import Flask
 
 # Bot Token - Environment variable'dan al
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '7715414446:AAGDvt3TiyjZxWAr6NzY8CN5qQf0_fy4PWw')
+BOT_TOKEN = os.getenv("BOT_TOKEN", "7715414446:AAGDvt3TiyjZxWAr6NzY8CN5qQf0_fy4PWw")
 
 # Developer's BTC Address
 DEVELOPER_BTC_ADDRESS = "bc1qzv7v3kengms6zguh7445xxy77dsrwjqxxrcxrt"
@@ -27,6 +28,17 @@ RATE_LIMIT_PER_DAY = 50
 
 # In-memory storage for rate limiting
 user_requests = defaultdict(list)
+
+# Flask app for health check
+app = Flask(__name__)
+
+@app.route('/health')
+def health_check():
+    return {'status': 'ok', 'timestamp': datetime.now().isoformat()}, 200
+
+@app.route('/')
+def home():
+    return {'message': 'Bitcoin Analyzer Bot is running', 'status': 'active'}, 200
 
 class RateLimiter:
     @staticmethod
@@ -457,21 +469,20 @@ async def analyze_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Last TX: {datetime.fromtimestamp(transactions[0]['status']['block_time']).strftime('%Y-%m-%d') if transactions and transactions[0].get('status', {}).get('block_time') else 'N/A'}
 
 🔄 **Recent Transactions:**
-"""
+        """
         
         # Recent transactions analysis
         if transactions:
             for i, tx in enumerate(transactions[:3]):
-                # Zaman bilgisi
+                # Time info
                 if tx.get('status', {}).get('block_time'):
                     tx_time = datetime.fromtimestamp(tx['status']['block_time']).strftime('%m/%d %H:%M')
                 else:
                     tx_time = 'Pending'
                 
-                # Bu adrese gelen miktar (outputs)
+                # Amount received (outputs)
                 value_received = 0
                 for vout in tx['vout']:
-                    # scriptpubkey_address kontrolü - hem string hem liste olabilir
                     addr_list = vout.get('scriptpubkey_address', [])
                     if isinstance(addr_list, str):
                         addr_list = [addr_list]
@@ -481,13 +492,12 @@ async def analyze_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if address in addr_list:
                         value_received += vout['value']
                 
-                # Bu adresten giden miktar (inputs)
+                # Amount sent (inputs)
                 value_sent = 0
                 for vin in tx['vin']:
                     prevout = vin.get('prevout', {})
                     if prevout:
                         prev_addr = prevout.get('scriptpubkey_address')
-                        # String veya liste kontrolü
                         if isinstance(prev_addr, str):
                             prev_addr_list = [prev_addr]
                         elif isinstance(prev_addr, list):
@@ -498,7 +508,7 @@ async def analyze_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if address in prev_addr_list:
                             value_sent += prevout.get('value', 0)
                 
-                # Net miktar ve yön belirleme
+                # Net amount and direction
                 net_value = value_received - value_sent
                 
                 if net_value > 0:
@@ -511,13 +521,15 @@ async def analyze_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     direction = "🔄 Internal"
                     amount_text = analyzer.format_btc(value_received) if value_received > 0 else "0.00000000 BTC"
                 
-                # TX ID (kısaltılmış)
+                # TX ID (shortened)
                 tx_id_short = tx['txid'][:8] + "..." + tx['txid'][-8:]
                 
                 analysis_text += f"\n• {direction} {amount_text} - {tx_time}"
                 analysis_text += f"\n  TX: `{tx_id_short}`"
         else:
             analysis_text += "\n• No transactions found"
+
+        analysis_text += "\n"
         
         keyboard = [
             [InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh_{address}"),
@@ -542,38 +554,16 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     print(f"Error: {context.error}")
 
-# Health check endpoint for Render.com
-async def health_check(request):
-    """Health check endpoint"""
-    return web.json_response({"status": "healthy", "timestamp": datetime.now().isoformat()})
-
-# Keep alive function
-async def keep_alive():
-    """Keep the bot alive by logging status"""
-    while True:
-        print(f"[{datetime.now()}] Bot is alive and running!")
-        await asyncio.sleep(300)  # 5 dakikada bir log
-
-async def start_web_server():
-    """Start web server for health checks"""
-    app = web.Application()
-    app.router.add_get('/health', health_check)
-    app.router.add_get('/', health_check)  # Root endpoint
-    
-    # Port'u environment variable'dan al, yoksa 10000 kullan
-    port = int(os.environ.get('PORT', 10000))
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    print(f"Web server started on port {port}")
+def run_flask():
+    """Run Flask app in a separate thread"""
+    port = int(os.getenv('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 def main():
-    """Start the bot"""
-    print("🚀 Bitcoin Wallet Analyzer Bot starting...")
-    print(f"⚡ Rate limits: {RATE_LIMIT_PER_HOUR}/hour, {RATE_LIMIT_PER_DAY}/day")
-    print(f"🔑 Bot token: {'*' * 20}{BOT_TOKEN[-10:] if BOT_TOKEN else 'NOT SET'}")
+    """Start the bot and Flask server"""
+    # Start Flask server in a separate thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
     
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -582,19 +572,10 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_address))
     application.add_error_handler(error_handler)
     
-    # Create event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    print("🚀 Bitcoin Wallet Analyzer Bot started!")
+    print(f"⚡ Rate limits: {RATE_LIMIT_PER_HOUR}/hour, {RATE_LIMIT_PER_DAY}/day")
+    print(f"🌐 Flask server running on port {os.getenv('PORT', 10000)}")
     
-    # Start web server
-    loop.run_until_complete(start_web_server())
-    
-    # Start keep alive task
-    loop.create_task(keep_alive())
-    
-    print("✅ Bot started successfully!")
-    
-    # Start polling
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
