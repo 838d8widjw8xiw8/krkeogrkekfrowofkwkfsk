@@ -1,18 +1,15 @@
 import asyncio
 import aiohttp
 import json
+import os
 from datetime import datetime, timedelta
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from aiohttp import web
 
-# Web server için gerekli kütüphaneler
-from flask import Flask
-import threading
-import os
-
-# Bot Token
-BOT_TOKEN = "7715414446:AAGDvt3TiyjZxWAr6NzY8CN5qQf0_fy4PWw"
+# Bot Token - Environment variable'dan al
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '7715414446:AAGDvt3TiyjZxWAr6NzY8CN5qQf0_fy4PWw')
 
 # Developer's BTC Address
 DEVELOPER_BTC_ADDRESS = "bc1qzv7v3kengms6zguh7445xxy77dsrwjqxxrcxrt"
@@ -30,26 +27,6 @@ RATE_LIMIT_PER_DAY = 50
 
 # In-memory storage for rate limiting
 user_requests = defaultdict(list)
-
-# Flask app for keeping bot alive
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "🚀 Bitcoin Wallet Analyzer Bot is running!"
-
-@app.route('/status')
-def status():
-    return {
-        "status": "online",
-        "bot": "Bitcoin Wallet Analyzer",
-        "timestamp": datetime.now().isoformat()
-    }
-
-def run_flask():
-    """Flask sunucusunu çalıştır"""
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
 
 class RateLimiter:
     @staticmethod
@@ -480,8 +457,9 @@ async def analyze_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Last TX: {datetime.fromtimestamp(transactions[0]['status']['block_time']).strftime('%Y-%m-%d') if transactions and transactions[0].get('status', {}).get('block_time') else 'N/A'}
 
 🔄 **Recent Transactions:**
-        """
+"""
         
+        # Recent transactions analysis
         if transactions:
             for i, tx in enumerate(transactions[:3]):
                 # Zaman bilgisi
@@ -493,6 +471,7 @@ async def analyze_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Bu adrese gelen miktar (outputs)
                 value_received = 0
                 for vout in tx['vout']:
+                    # scriptpubkey_address kontrolü - hem string hem liste olabilir
                     addr_list = vout.get('scriptpubkey_address', [])
                     if isinstance(addr_list, str):
                         addr_list = [addr_list]
@@ -508,6 +487,7 @@ async def analyze_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     prevout = vin.get('prevout', {})
                     if prevout:
                         prev_addr = prevout.get('scriptpubkey_address')
+                        # String veya liste kontrolü
                         if isinstance(prev_addr, str):
                             prev_addr_list = [prev_addr]
                         elif isinstance(prev_addr, list):
@@ -562,12 +542,38 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     print(f"Error: {context.error}")
 
+# Health check endpoint for Render.com
+async def health_check(request):
+    """Health check endpoint"""
+    return web.json_response({"status": "healthy", "timestamp": datetime.now().isoformat()})
+
+# Keep alive function
+async def keep_alive():
+    """Keep the bot alive by logging status"""
+    while True:
+        print(f"[{datetime.now()}] Bot is alive and running!")
+        await asyncio.sleep(300)  # 5 dakikada bir log
+
+async def start_web_server():
+    """Start web server for health checks"""
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/', health_check)  # Root endpoint
+    
+    # Port'u environment variable'dan al, yoksa 10000 kullan
+    port = int(os.environ.get('PORT', 10000))
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"Web server started on port {port}")
+
 def main():
     """Start the bot"""
-    # Flask sunucusunu ayrı thread'de başlat
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    print("🌐 Flask server started for keep-alive")
+    print("🚀 Bitcoin Wallet Analyzer Bot starting...")
+    print(f"⚡ Rate limits: {RATE_LIMIT_PER_HOUR}/hour, {RATE_LIMIT_PER_DAY}/day")
+    print(f"🔑 Bot token: {'*' * 20}{BOT_TOKEN[-10:] if BOT_TOKEN else 'NOT SET'}")
     
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -576,9 +582,19 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_address))
     application.add_error_handler(error_handler)
     
-    print("🚀 Bitcoin Wallet Analyzer Bot started!")
-    print(f"⚡ Rate limits: {RATE_LIMIT_PER_HOUR}/hour, {RATE_LIMIT_PER_DAY}/day")
+    # Create event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
+    # Start web server
+    loop.run_until_complete(start_web_server())
+    
+    # Start keep alive task
+    loop.create_task(keep_alive())
+    
+    print("✅ Bot started successfully!")
+    
+    # Start polling
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
